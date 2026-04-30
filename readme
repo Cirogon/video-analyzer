@@ -1,0 +1,177 @@
+# VideoAnalyzer — Pipeline Modular de Clips Virales
+
+Herramienta de análisis y edición automática de videos que utiliza IA local (Whisper + Ollama) para detectar los momentos más virales y extraerlos como clips listos para redes sociales.
+
+---
+
+## ¿Qué hace?
+
+1. Transcribe el audio del video con Whisper
+2. Detecta escenas y describe frames con un modelo de visión (LLaVA / Qwen)
+3. Analiza el contenido con un LLM de texto (LLaMA 3.1) para identificar momentos clave
+4. Calcula un **Virality Score** (0–100) por cada segmento candidato
+5. Extrae automáticamente los clips con mayor potencial viral
+6. (Opcional) Detecta al protagonista y aplica smart reframe para formato vertical
+
+---
+
+## Requisitos
+
+- Python 3.10+
+- [Ollama](https://ollama.com/) corriendo localmente con los modelos:
+  - `llama3.1:latest` — análisis de texto
+  - `qwen3.5:latest` (o `llava:7b`) — descripción de frames
+  - `nomic-embed-text:latest` — embeddings semánticos
+- `ffmpeg` y `ffprobe` en el PATH
+- GPU recomendada (CUDA); también corre en CPU con mayor tiempo
+
+### Instalación de dependencias
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Uso rápido
+
+```bash
+python run_pipeline.py
+```
+
+Por defecto toma el video definido en `config.py` (`video_path`). También podés pasar la ruta como argumento:
+
+```bash
+python run_pipeline.py --video_path /ruta/al/video.mp4
+```
+
+### Opciones principales
+
+| Flag | Descripción |
+|---|---|
+| `--video_path <ruta>` | Ruta al video de entrada |
+| `--min_virality <N>` | Score mínimo para extraer un clip (default: 50, rango 0–100) |
+| `--skip_vision` | Omite los pasos 4 y 4.5 (más rápido, sin análisis visual) |
+| `--non_interactive` | Confirma temas automáticamente, sin input del usuario |
+| `--only_steps <N…>` | Corre solo los pasos indicados (ej: `--only_steps 5 6`) |
+| `--run_id <id>` | Retoma un run existente desde un paso específico |
+| `--ui` | Lanza la interfaz web Gradio en el navegador |
+
+### Ejemplos
+
+```bash
+# Extraer solo clips con score ≥ 70
+python run_pipeline.py --video_path video.mp4 --min_virality 70
+
+# Re-correr solo el análisis y la extracción de un run previo
+python run_pipeline.py --run_id 20260417_203924 --only_steps 5 6
+
+# Sin análisis visual (más rápido)
+python run_pipeline.py --skip_vision
+
+# Interfaz web
+python run_pipeline.py --ui
+```
+
+---
+
+## Pipeline: pasos y scripts
+
+| Paso | Script | Descripción |
+|---|---|---|
+| 0 | `step0_split_video.py` | Divide el video en chunks (opcional, para videos muy largos) |
+| 1 | `step1_extract_audio.py` | Extrae el audio en WAV |
+| 2 | `step2_transcribe.py` | Transcribe con Whisper (con timestamps) |
+| 2.5 | `step2b_audio_features.py` | Analiza energía y picos de audio |
+| 2.8 | `step2c_embed_transcript.py` | Genera embeddings semánticos del transcript |
+| 3 | `step3_detect_scenes.py` | Detecta cortes de escena por diferencia de frames |
+| 4 | `step4_describe_frames.py` | Describe frames clave con LLaVA |
+| 4.5 | `step4a_detect_themes.py` | Detecta temas principales del video |
+| 5 | `step5_analyze.py` | Analiza con LLM: genera `reel_plan` con roles narrativos |
+| 6 | `step6_extract_clips.py` | Extrae clips + calcula Virality Score final |
+| 6.5 | `step6b_track_protagonist.py` | Detecta y sigue al protagonista |
+| — | `step6c_smart_reframe.py` | Smart reframe por segmento (requiere manifest previo) |
+
+> El paso 0 **no** corre automáticamente; debe incluirse explícitamente con `--only_steps 0`.
+
+---
+
+## Virality Score
+
+El score final (0–100) combina cuatro señales:
+
+| Señal | Fuente | Peso |
+|---|---|---|
+| LLM score | `reel_plan.virality_score` (escala 1–10) | 40% |
+| Energía de audio | `audio_features.energy_peaks` | 25% |
+| Tipo de engagement | hook > emotion > cta > education > other | 20% |
+| Dinámica de planos | `shot_plan` del manifest | 15% |
+
+---
+
+## Estructura de salida
+
+```
+output/
+└── <run_id>/
+    ├── audio.wav
+    ├── transcript.json
+    ├── scenes.json
+    ├── frames.json
+    ├── audio_features.json
+    ├── vector_store.json
+    ├── themes.json
+    ├── analysis.json          ← reel_plan con roles narrativos
+    ├── virality_report.json   ← ranking completo de clips
+    ├── run.log
+    └── clips/
+        ├── clip_1.mp4
+        ├── clip_2.mp4
+        └── manifest.json
+```
+
+---
+
+## Configuración (`config.py`)
+
+Los parámetros principales están en la clase `Config`:
+
+```python
+video_path        = "video.mp4"        # ruta al video
+whisper_model     = "small"            # base | small | medium | large-v2
+whisper_device    = "cuda"             # cpu | cuda
+whisper_language  = "es"              # None = autodetección
+ollama_model      = "llama3.1:latest" # modelo de texto
+ollama_vision_model = "qwen3.5:latest" # modelo de visión
+clip_padding_sec  = 4                  # padding al inicio/fin de cada clip
+min_virality      = 50                 # (sobreescribible por CLI)
+```
+
+También podés setear la ruta al video via variable de entorno:
+
+```bash
+export VIDEO_PATH=/ruta/al/video.mp4
+python run_pipeline.py
+```
+
+---
+
+## Interfaz web (Gradio)
+
+```bash
+python run_pipeline.py --ui
+```
+
+Abre un panel local en el navegador para configurar y correr el pipeline visualmente, ver logs en tiempo real y previsualizar los clips generados.
+
+---
+
+## Notas
+
+- Todos los modelos corren **100% localmente** — no se envía datos a servicios externos.
+- El paso 4.5 (temas) es no-bloqueante: si falla, el pipeline continúa sin `themes.json`.
+- Para retomar un pipeline interrumpido usá `--run_id <id> --only_steps <paso_fallido>`.
+- El paso 9 (captions animados) fue removido del pipeline automático; ejecutarlo manualmente:
+  ```bash
+  python step9_captions.py --run_id <run_id>
+  ```
